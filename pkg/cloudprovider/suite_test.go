@@ -51,6 +51,8 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/controllers/provisioning"
+	dynamicprovisioner "sigs.k8s.io/karpenter/pkg/controllers/provisioning/dynamic"
+
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	"sigs.k8s.io/karpenter/pkg/events"
 	coreoptions "sigs.k8s.io/karpenter/pkg/operator/options"
@@ -67,7 +69,8 @@ var ctx context.Context
 var stop context.CancelFunc
 var env *coretest.Environment
 var awsEnv *test.Environment
-var prov *provisioning.Provisioner
+var prov *dynamicprovisioner.ProvisioningController
+var ncProv *provisioning.Provisioner
 var cloudProvider *cloudprovider.CloudProvider
 var cluster *state.Cluster
 var fakeClock *clock.FakeClock
@@ -94,7 +97,8 @@ var _ = BeforeSuite(func() {
 	cloudProvider = cloudprovider.New(awsEnv.InstanceTypesProvider, awsEnv.InstanceProvider, recorder,
 		env.Client, awsEnv.AMIProvider, awsEnv.SecurityGroupProvider, awsEnv.CapacityReservationProvider)
 	cluster = state.NewCluster(fakeClock, env.Client, cloudProvider)
-	prov = provisioning.NewProvisioner(env.Client, recorder, cloudProvider, cluster, fakeClock)
+	prov = dynamicprovisioner.NewProvisioningController(env.Client, recorder, cloudProvider, cluster, fakeClock)
+	ncProv = provisioning.NewProvisioner(env.Client, recorder, cluster)
 })
 
 var _ = AfterSuite(func() {
@@ -327,7 +331,7 @@ var _ = Describe("CloudProvider", func() {
 			nodeClass.Spec.Context = aws.String(contextID)
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
 			createFleetInput := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
@@ -336,7 +340,7 @@ var _ = Describe("CloudProvider", func() {
 		It("should default to no EC2 Context", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
 			createFleetInput := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
@@ -424,7 +428,7 @@ var _ = Describe("CloudProvider", func() {
 						corev1.ResourceCPU: resource.MustParse("0.9")},
 					},
 				})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod1, pod2)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod1, pod2)
 
 			// Under normal circumstances 1 node would have been created that fits both the pods but
 			// here minValue enforces to include both the instances. And since one of the instances can
@@ -522,7 +526,7 @@ var _ = Describe("CloudProvider", func() {
 						corev1.ResourceCPU: resource.MustParse("0.9")},
 					},
 				})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod1, pod2)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod1, pod2)
 
 			// Under normal circumstances 1 node would have been created that fits both the pods but
 			// here minValue enforces to include both the instances. And since one of the instances can
@@ -628,7 +632,7 @@ var _ = Describe("CloudProvider", func() {
 						corev1.ResourceCPU: resource.MustParse("0.9")},
 					},
 				})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod1, pod2)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod1, pod2)
 
 			// Under normal circumstances 1 node would have been created that fits both the pods but
 			// here minValue enforces to include all the 3 instances to satisfy both the instance-type and instance-family requirements.
@@ -1197,7 +1201,7 @@ var _ = Describe("CloudProvider", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod(
 				coretest.PodOptions{NodeSelector: map[string]string{corev1.LabelArchStable: karpv1.ArchitectureAmd64}})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
 			input := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
@@ -1230,7 +1234,7 @@ var _ = Describe("CloudProvider", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			ExpectObjectReconciled(ctx, env.Client, controller, nodeClass)
 			pod := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{corev1.LabelTopologyZone: "test-zone-1a"}})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			createFleetInput := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
 			Expect(fake.SubnetsFromFleetRequest(createFleetInput)).To(ConsistOf("test-subnet-2"))
@@ -1252,14 +1256,14 @@ var _ = Describe("CloudProvider", func() {
 			ExpectObjectReconciled(ctx, env.Client, controller, nodeClass)
 			pod1 := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{corev1.LabelTopologyZone: "test-zone-1a"}})
 			pod2 := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{corev1.LabelTopologyZone: "test-zone-1a"}})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod1, pod2)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod1, pod2)
 			ExpectScheduled(ctx, env.Client, pod1)
 			ExpectScheduled(ctx, env.Client, pod2)
 			createFleetInput := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
 			Expect(fake.SubnetsFromFleetRequest(createFleetInput)).To(ConsistOf("test-subnet-2"))
 			// Provision for another pod that should now use the other subnet since we've consumed some from the first launch.
 			pod3 := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{corev1.LabelTopologyZone: "test-zone-1a"}})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod3)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod3)
 			ExpectScheduled(ctx, env.Client, pod3)
 			createFleetInput = awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
 			Expect(fake.SubnetsFromFleetRequest(createFleetInput)).To(ConsistOf("test-subnet-1"))
@@ -1272,7 +1276,7 @@ var _ = Describe("CloudProvider", func() {
 			pod1 := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{corev1.LabelTopologyZone: "test-zone-1a"}})
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass, pod1)
 			awsEnv.EC2API.CreateFleetBehavior.Error.Set(fmt.Errorf("CreateFleet synthetic error"))
-			bindings := ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod1)
+			bindings := ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod1)
 			Expect(len(bindings)).To(Equal(0))
 		})
 		It("should launch instances into subnets that are excluded by another NodePool", func() {
@@ -1295,7 +1299,7 @@ var _ = Describe("CloudProvider", func() {
 			controller := nodeclass.NewController(awsEnv.Clock, env.Client, cloudProvider, recorder, fake.DefaultRegion, awsEnv.SubnetProvider, awsEnv.SecurityGroupProvider, awsEnv.AMIProvider, awsEnv.InstanceProfileProvider, awsEnv.InstanceTypesProvider, awsEnv.LaunchTemplateProvider, awsEnv.CapacityReservationProvider, awsEnv.EC2API, awsEnv.ValidationCache, awsEnv.AMIResolver)
 			ExpectObjectReconciled(ctx, env.Client, controller, nodeClass)
 			podSubnet1 := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, podSubnet1)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, podSubnet1)
 			ExpectScheduled(ctx, env.Client, podSubnet1)
 			createFleetInput := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
 			Expect(fake.SubnetsFromFleetRequest(createFleetInput)).To(ConsistOf("test-subnet-1"))
@@ -1338,7 +1342,7 @@ var _ = Describe("CloudProvider", func() {
 			ExpectApplied(ctx, env.Client, nodePool2, nodeClass2)
 			ExpectObjectReconciled(ctx, env.Client, controller, nodeClass2)
 			podSubnet2 := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{karpv1.NodePoolLabelKey: nodePool2.Name}})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, podSubnet2)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, podSubnet2)
 			ExpectScheduled(ctx, env.Client, podSubnet2)
 			createFleetInput = awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
 			Expect(fake.SubnetsFromFleetRequest(createFleetInput)).To(ConsistOf("test-subnet-2"))
@@ -1382,7 +1386,7 @@ var _ = Describe("CloudProvider", func() {
 			})
 			ExpectApplied(ctx, env.Client, nodePool, nodePool2, nodeClass, misconfiguredNodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 		})
 	})
@@ -1453,7 +1457,7 @@ var _ = Describe("CloudProvider", func() {
 		It("should mark capacity reservations as launched", func() {
 			pod := coretest.UnschedulablePod()
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass, pod)
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ncs := ExpectNodeClaims(ctx, env.Client)
 			Expect(ncs).To(HaveLen(1))
@@ -1462,7 +1466,7 @@ var _ = Describe("CloudProvider", func() {
 		It("should mark capacity reservations as terminated", func() {
 			pod := coretest.UnschedulablePod()
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass, pod)
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ncs := ExpectNodeClaims(ctx, env.Client)
 			Expect(ncs).To(HaveLen(1))
@@ -1488,7 +1492,7 @@ var _ = Describe("CloudProvider", func() {
 					},
 				})
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass, pod)
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				ncs := ExpectNodeClaims(ctx, env.Client)
 				Expect(ncs).To(HaveLen(1))

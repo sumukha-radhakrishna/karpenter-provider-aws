@@ -43,6 +43,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	clock "k8s.io/utils/clock/testing"
+	dynamicprovisioner "sigs.k8s.io/karpenter/pkg/controllers/provisioning/dynamic"
 
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -71,7 +72,8 @@ var ctx context.Context
 var env *coretest.Environment
 var awsEnv *test.Environment
 var fakeClock *clock.FakeClock
-var prov *provisioning.Provisioner
+var prov *dynamicprovisioner.ProvisioningController
+var ncProv *provisioning.Provisioner
 var cluster *state.Cluster
 var cloudProvider *cloudprovider.CloudProvider
 
@@ -90,7 +92,8 @@ var _ = BeforeSuite(func() {
 	cloudProvider = cloudprovider.New(awsEnv.InstanceTypesProvider, awsEnv.InstanceProvider, events.NewRecorder(&record.FakeRecorder{}),
 		env.Client, awsEnv.AMIProvider, awsEnv.SecurityGroupProvider, awsEnv.CapacityReservationProvider)
 	cluster = state.NewCluster(fakeClock, env.Client, cloudProvider)
-	prov = provisioning.NewProvisioner(env.Client, events.NewRecorder(&record.FakeRecorder{}), cloudProvider, cluster, fakeClock)
+	prov = dynamicprovisioner.NewProvisioningController(env.Client, events.NewRecorder(&record.FakeRecorder{}), cloudProvider, cluster, fakeClock)
+	ncProv = provisioning.NewProvisioner(env.Client, events.NewRecorder(&record.FakeRecorder{}), cluster)
 })
 
 var _ = AfterSuite(func() {
@@ -276,7 +279,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 		for key, value := range nodeSelector {
 			pods = append(pods, coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{key: value}}))
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 		for _, pod := range pods {
 			ExpectScheduled(ctx, env.Client, pod)
 		}
@@ -334,7 +337,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				)).UnsortedList(), lo.Keys(karpv1.NormalizedLabels)...)))
 
 		pod := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: nodeSelector})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 	})
 	It("should support instance type labels with accelerator", func() {
@@ -389,7 +392,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 		Expect(lo.Keys(nodeSelector)).To(ContainElements(expectedLabels))
 
 		pod := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: nodeSelector})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 	})
 	It("should not launch AWS Pod ENI on a t3", func() {
@@ -403,7 +406,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Limits:   corev1.ResourceList{v1.ResourceAWSPodENI: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectNotScheduled(ctx, env.Client, pod)
 	})
 	It("should order the instance types by price and only consider the cheapest ones", func() {
@@ -423,7 +426,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 		its, err := cloudProvider.GetInstanceTypes(ctx, nodePool)
 		Expect(err).To(BeNil())
@@ -486,7 +489,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 
 		its, err := cloudProvider.GetInstanceTypes(ctx, nodePool)
@@ -546,7 +549,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 		})
 
 		// Check if pods are scheduled and if CreateFleet has the expensive instance-types.
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 		Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
 		call := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
@@ -568,7 +571,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 
 		Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
@@ -587,7 +590,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 
 		Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
@@ -616,7 +619,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 	})
 	It("should launch vpc.amazonaws.com/pod-eni on a compatible instance type", func() {
@@ -627,7 +630,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Limits:   corev1.ResourceList{v1.ResourceAWSPodENI: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		node := ExpectScheduled(ctx, env.Client, pod)
 		Expect(node.Labels).To(HaveKey(corev1.LabelInstanceTypeStable))
 		supportsPodENI := func() bool {
@@ -645,7 +648,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Limits:   corev1.ResourceList{v1.ResourcePrivateIPv4Address: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		node := ExpectScheduled(ctx, env.Client, pod)
 		Expect(node.Labels).To(HaveKey(corev1.LabelInstanceTypeStable))
 		limits, ok := instancetype.Limits[node.Labels[corev1.LabelInstanceTypeStable]]
@@ -706,7 +709,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Limits:   corev1.ResourceList{v1.ResourcePrivateIPv4Address: resource.MustParse("1")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectNotScheduled(ctx, env.Client, pod)
 	})
 	It("should launch instances for nvidia.com/gpu resource requests", func() {
@@ -734,7 +737,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				},
 			}),
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 		for _, pod := range pods {
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(corev1.LabelInstanceTypeStable, "p3.8xlarge"))
@@ -765,7 +768,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				},
 			}),
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 		for _, pod := range pods {
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(corev1.LabelInstanceTypeStable, "dl1.24xlarge"))
@@ -798,7 +801,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				},
 			}),
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 		for _, pod := range pods {
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(corev1.LabelInstanceTypeStable, "inf2.24xlarge"))
@@ -826,7 +829,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				},
 			}),
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 		for _, pod := range pods {
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(corev1.LabelInstanceTypeStable, "trn1.2xlarge"))
@@ -854,7 +857,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				},
 			}),
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 		for _, pod := range pods {
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(corev1.LabelInstanceTypeStable, "inf2.xlarge"))
@@ -887,7 +890,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				},
 			}),
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 		nodes := sets.NewString()
 		for _, pod := range pods {
 			node := ExpectScheduled(ctx, env.Client, pod)
@@ -921,7 +924,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				},
 			}),
 		}
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 		for _, pod := range pods {
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(corev1.LabelInstanceTypeStable, "g4ad.16xlarge"))
@@ -936,7 +939,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Requests: corev1.ResourceList{corev1.ResourceEphemeralStorage: resource.MustParse("5000Gi")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectNotScheduled(ctx, env.Client, pod)
 	})
 	It("should launch instances w/ instance storage for ephemeral storage resource requests when disks are mounted for ephemeral-storage", func() {
@@ -947,7 +950,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Requests: corev1.ResourceList{corev1.ResourceEphemeralStorage: resource.MustParse("5000Gi")},
 			},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		node := ExpectScheduled(ctx, env.Client, pod)
 		Expect(node.Labels[corev1.LabelInstanceTypeStable]).To(Equal("m6idn.32xlarge"))
 		Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("7600G")))
@@ -1045,7 +1048,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				Values:   []string{"test-zone-1a-local"},
 			}},
 		})
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 	})
 	Context("Overhead", func() {
@@ -2015,13 +2018,13 @@ var _ = Describe("InstanceTypeProvider", func() {
 					},
 				}),
 			}
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 			// it should've tried to pack them on a single inf2.24xlarge then hit an insufficient capacity error
 			for _, pod := range pods {
 				ExpectNotScheduled(ctx, env.Client, pod)
 			}
 			nodeNames := sets.NewString()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 			for _, pod := range pods {
 				node := ExpectScheduled(ctx, env.Client, pod)
 				Expect(node.Labels).To(HaveKeyWithValue(v1.LabelInstanceAcceleratorName, "inferentia2"))
@@ -2046,11 +2049,11 @@ var _ = Describe("InstanceTypeProvider", func() {
 				},
 			}}}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			// it should've tried to pack them in test-zone-1a on a p3.8xlarge then hit insufficient capacity, the next attempt will try test-zone-1b
 			ExpectNotScheduled(ctx, env.Client, pod)
 
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(SatisfyAll(
 				HaveKeyWithValue(corev1.LabelInstanceTypeStable, "p3.8xlarge"),
@@ -2080,11 +2083,11 @@ var _ = Describe("InstanceTypeProvider", func() {
 			}
 			// Provisions 2 m5.large instances since m5.xlarge was ICE'd
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 			for _, pod := range pods {
 				ExpectNotScheduled(ctx, env.Client, pod)
 			}
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 			for _, pod := range pods {
 				node := ExpectScheduled(ctx, env.Client, pod)
 				Expect(node.Labels[corev1.LabelInstanceTypeStable]).To(Equal("m5.large"))
@@ -2100,12 +2103,12 @@ var _ = Describe("InstanceTypeProvider", func() {
 					Limits:   corev1.ResourceList{v1.ResourceAWSNeuron: resource.MustParse("2")},
 				},
 			})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectNotScheduled(ctx, env.Client, pod)
 			// capacity shortage is over - expire the item from the cache and try again
 			awsEnv.EC2API.InsufficientCapacityPools.Set([]fake.CapacityPool{})
 			awsEnv.UnavailableOfferingsCache.Delete("inf2.24xlarge", "test-zone-1a", karpv1.CapacityTypeOnDemand)
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(corev1.LabelInstanceTypeStable, "inf2.24xlarge"))
 		})
@@ -2126,11 +2129,11 @@ var _ = Describe("InstanceTypeProvider", func() {
 				},
 			}}}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			// it should've tried to pack them in test-zone-1a on a dl1.24xlarge then hit insufficient capacity, the next attempt will try test-zone-1b
 			ExpectNotScheduled(ctx, env.Client, pod)
 
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(SatisfyAll(
 				HaveKeyWithValue(corev1.LabelInstanceTypeStable, "dl1.24xlarge"),
@@ -2164,10 +2167,10 @@ var _ = Describe("InstanceTypeProvider", func() {
 			// Spot Unavailable
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectNotScheduled(ctx, env.Client, pod)
 			// include deprioritized instance types
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			// Fallback to OD
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(karpv1.CapacityTypeLabelKey, karpv1.CapacityTypeOnDemand))
@@ -2199,7 +2202,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			for _, ct := range []string{karpv1.CapacityTypeOnDemand, karpv1.CapacityTypeSpot} {
 				for _, zone := range []string{"test-zone-1a", "test-zone-1b"} {
-					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov,
+					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv,
 						coretest.UnschedulablePod(coretest.PodOptions{
 							ResourceRequirements: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
@@ -2229,7 +2232,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 		It("should default to on-demand", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(karpv1.CapacityTypeLabelKey, karpv1.CapacityTypeOnDemand))
 		})
@@ -2238,7 +2241,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 				{NodeSelectorRequirement: corev1.NodeSelectorRequirement{Key: karpv1.CapacityTypeLabelKey, Operator: corev1.NodeSelectorOpIn, Values: []string{karpv1.CapacityTypeSpot, karpv1.CapacityTypeOnDemand}}}}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(karpv1.CapacityTypeLabelKey, karpv1.CapacityTypeSpot))
 		})
@@ -2265,7 +2268,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 			// Instance type with no zonal availability for spot shouldn't be scheduled
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectNotScheduled(ctx, env.Client, pod)
 		})
 		It("should succeed to launch spot instance when zonal availability exists", func() {
@@ -2290,7 +2293,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKeyWithValue(karpv1.NodePoolLabelKey, nodePool.Name))
 		})
@@ -2319,7 +2322,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("20Gi")))
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically(">=", 1))
@@ -2333,7 +2336,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 		It("should default to EBS defaults when volumeSize is not defined in blockDeviceMappings for AL2 Root volume", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("20Gi")))
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically(">=", 1))
@@ -2350,7 +2353,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 			awsEnv.LaunchTemplateProvider.ClusterCIDR.Store(lo.ToPtr("10.100.0.0/16"))
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("20Gi")))
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically(">=", 1))
@@ -2366,7 +2369,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 			nodeClass.Spec.BlockDeviceMappings[0].DeviceName = aws.String("/dev/xvdb")
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("20Gi")))
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically(">=", 1))
@@ -2383,7 +2386,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 		It("should default metadata options on generated launch template", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically(">=", 1))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -2402,7 +2405,7 @@ var _ = Describe("InstanceTypeProvider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically(">=", 1))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {

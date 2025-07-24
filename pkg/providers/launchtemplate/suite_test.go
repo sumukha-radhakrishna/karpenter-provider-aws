@@ -46,6 +46,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	clock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	dynamicprovisioner "sigs.k8s.io/karpenter/pkg/controllers/provisioning/dynamic"
 	"sigs.k8s.io/yaml"
 
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -78,7 +79,8 @@ var stop context.CancelFunc
 var env *coretest.Environment
 var awsEnv *test.Environment
 var fakeClock *clock.FakeClock
-var prov *provisioning.Provisioner
+var prov *dynamicprovisioner.ProvisioningController
+var ncProv *provisioning.Provisioner
 var cluster *state.Cluster
 var cloudProvider *cloudprovider.CloudProvider
 var recorder events.Recorder
@@ -105,7 +107,8 @@ var _ = BeforeSuite(func() {
 	cloudProvider = cloudprovider.New(awsEnv.InstanceTypesProvider, awsEnv.InstanceProvider, recorder,
 		env.Client, awsEnv.AMIProvider, awsEnv.SecurityGroupProvider, awsEnv.CapacityReservationProvider)
 	cluster = state.NewCluster(fakeClock, env.Client, cloudProvider)
-	prov = provisioning.NewProvisioner(env.Client, recorder, cloudProvider, cluster, fakeClock)
+	prov = dynamicprovisioner.NewProvisioningController(env.Client, recorder, cloudProvider, cluster, fakeClock)
+	ncProv = provisioning.NewProvisioner(env.Client, recorder, cluster)
 })
 
 var _ = AfterSuite(func() {
@@ -303,7 +306,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}),
 		}
 		ExpectApplied(ctx, env.Client, nodePool, nodeClass, nodePool2, nodeClass2)
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 		ltConfigCount := len(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop().LaunchTemplateConfigs) + len(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop().LaunchTemplateConfigs)
 		Expect(ltConfigCount).To(BeNumerically("==", awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()))
 		nodeClasses := [2]string{nodeClass.Name, nodeClass2.Name}
@@ -318,7 +321,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 	It("should default to a generated launch template", func() {
 		ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 		pod := coretest.UnschedulablePod()
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 
 		Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(BeNumerically("==", 1))
@@ -339,7 +342,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 		nodeClass.StatusConditions().SetFalse(v1.ConditionTypeInstanceProfileReady, "reason", "message")
 		ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 		pod := coretest.UnschedulablePod()
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectNotScheduled(ctx, env.Client, pod)
 	})
 	It("should use the instance profile on the EC2NodeClass when specified", func() {
@@ -348,7 +351,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 		nodeClass.Status.InstanceProfile = "overridden-profile"
 		ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 		pod := coretest.UnschedulablePod()
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 		Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 		awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -390,7 +393,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				Tolerations:          []corev1.Toleration{t1, t2, t3},
 				ResourceRequirements: rr,
 			})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod1)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod1)
 			ExpectScheduled(ctx, env.Client, pod1)
 			Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
 			createFleetInput := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
@@ -403,7 +406,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				Tolerations:          []corev1.Toleration{t2, t3, t1},
 				ResourceRequirements: rr,
 			})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod2)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod2)
 
 			ExpectScheduled(ctx, env.Client, pod2)
 			Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
@@ -418,7 +421,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			nodeClass.Spec.Kubelet = &v1.KubeletConfiguration{MaxPods: aws.Int32(1)}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 2))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -433,7 +436,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				Message: "The launch template name is invalid.",
 			}, fake.MaxCalls(1))
 			pod = coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			// should call fleet twice. Once will fail on invalid LT and the next will succeed
 			Expect(awsEnv.EC2API.CreateFleetBehavior.FailedCalls()).To(BeNumerically("==", 1))
@@ -547,7 +550,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 		It("should apply labels to the node", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels).To(HaveKey(corev1.LabelOSStable))
 			Expect(node.Labels).To(HaveKey(corev1.LabelArchStable))
@@ -562,7 +565,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
 			createFleetInput := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
@@ -594,7 +597,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(i *ec2.CreateLaunchTemplateInput) {
 				Expect(i.LaunchTemplateData.TagSpecifications).To(HaveLen(2))
@@ -614,7 +617,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(Equal(1))
 			createFleetInput := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
@@ -636,7 +639,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			nodeClass.Spec.AMISelectorTerms = []v1.AMISelectorTerm{{Alias: "al2@latest"}}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -652,7 +655,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			awsEnv.LaunchTemplateProvider.ClusterCIDR.Store(lo.ToPtr("10.100.0.0/16"))
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -689,7 +692,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -738,7 +741,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -751,7 +754,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			nodeClass.Spec.AMISelectorTerms = []v1.AMISelectorTerm{{Alias: "bottlerocket@latest"}}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -771,7 +774,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			nodeClass.Spec.AMISelectorTerms = []v1.AMISelectorTerm{{Tags: map[string]string{"*": "*"}}}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 2))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -796,7 +799,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 2))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -821,7 +824,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				}},
 			))
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 		})
 		It("should pack pods with any ephemeral-storage request", func() {
@@ -830,7 +833,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				Requests: map[corev1.ResourceName]resource.Quantity{
 					corev1.ResourceEphemeralStorage: resource.MustParse("1G"),
 				}}})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 		})
 		It("should pack pods with large ephemeral-storage request", func() {
@@ -839,7 +842,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				Requests: map[corev1.ResourceName]resource.Quantity{
 					corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
 				}}})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 		})
 		It("should not pack pods if the sum of pod ephemeral-storage and overhead exceeds node capacity", func() {
@@ -848,7 +851,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				Requests: map[corev1.ResourceName]resource.Quantity{
 					corev1.ResourceEphemeralStorage: resource.MustParse("19Gi"),
 				}}})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectNotScheduled(ctx, env.Client, pod)
 		})
 		It("should pack pods if the pod's ephemeral-storage exceeds node capacity and instance storage is mounted", func() {
@@ -859,7 +862,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 					// Default node ephemeral-storage capacity is 20Gi
 					corev1.ResourceEphemeralStorage: resource.MustParse("5000Gi"),
 				}}})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			node := ExpectScheduled(ctx, env.Client, pod)
 			Expect(node.Labels[corev1.LabelInstanceTypeStable]).To(Equal("m6idn.32xlarge"))
 			Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("7600G")))
@@ -881,7 +884,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				},
 				}),
 			}
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 			for _, pod := range pods {
 				nodes = append(nodes, ExpectScheduled(ctx, env.Client, pod))
 			}
@@ -903,7 +906,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				},
 				}),
 			}
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pods...)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pods...)
 			ExpectScheduled(ctx, env.Client, pods[0])
 			ExpectNotScheduled(ctx, env.Client, pods[1])
 		})
@@ -915,7 +918,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				},
 			},
 			})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectNotScheduled(ctx, env.Client, pod)
 		})
 		It("should pack pods using the blockdevicemappings from the provider spec when defined", func() {
@@ -940,7 +943,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				},
 			},
 			})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 
 			// capacity isn't recorded on the node any longer, but we know the pod should schedule
 			ExpectScheduled(ctx, env.Client, pod)
@@ -970,7 +973,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				},
 			},
 			})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 
 			// capacity isn't recorded on the node any longer, but we know the pod should schedule
 			ExpectScheduled(ctx, env.Client, pod)
@@ -1007,7 +1010,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 				},
 			},
 			})
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 
 			// capacity isn't recorded on the node any longer, but we know the pod should schedule
 			ExpectScheduled(ctx, env.Client, pod)
@@ -1149,7 +1152,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 		It("should specify --use-max-pods=false when using ENI-based pod density", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataContaining("--use-max-pods false")
 		})
@@ -1157,7 +1160,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			nodeClass.Spec.Kubelet = &v1.KubeletConfiguration{MaxPods: aws.Int32(10)}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataContaining("--use-max-pods false", "--max-pods=10")
 		})
@@ -1169,7 +1172,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			// We expect to generate 5 launch templates for our image/max-pods combination where we were only generating 2 before
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
@@ -1184,7 +1187,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1211,7 +1214,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1238,7 +1241,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1270,7 +1273,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1302,7 +1305,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1325,7 +1328,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataContaining(fmt.Sprintf("--eviction-max-pod-grace-period=%d", 300))
 		})
@@ -1335,7 +1338,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataContaining(fmt.Sprintf("--pods-per-core=%d", 2))
 		})
@@ -1346,7 +1349,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataContaining(fmt.Sprintf("--pods-per-core=%d", 2), fmt.Sprintf("--max-pods=%d", 100))
 		})
@@ -1354,7 +1357,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			awsEnv.LaunchTemplateProvider.KubeDNSIP = net.ParseIP("fd4b:121b:812b::a")
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataContaining("--dns-cluster-ip 'fd4b:121b:812b::a'")
 			ExpectLaunchTemplatesCreatedWithUserDataContaining("--ip-family ipv6")
@@ -1362,7 +1365,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 		It("should specify --dns-cluster-ip when running in an ipv4 cluster", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataContaining("--dns-cluster-ip '10.0.100.10'")
 		})
@@ -1372,7 +1375,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataContaining("--image-gc-high-threshold=50")
 		})
@@ -1382,7 +1385,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataContaining("--image-gc-low-threshold=50")
 		})
@@ -1392,7 +1395,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataContaining("--cpu-cfs-quota=false")
 		})
@@ -1413,7 +1416,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			})
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			ExpectLaunchTemplatesCreatedWithUserDataNotContaining(corev1.LabelNamespaceNodeRestriction)
 		})
@@ -1421,7 +1424,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			nodeClass.Spec.InstanceStorePolicy = lo.ToPtr(v1.InstanceStorePolicyRAID0)
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
@@ -1432,7 +1435,7 @@ var _ = Describe("LaunchTemplate Provider", func() {
 			nodeClass.Spec.InstanceStorePolicy = lo.ToPtr(v1.InstanceStorePolicyRAID0)
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
@@ -1454,7 +1457,7 @@ essential = true
 `)
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
@@ -1486,7 +1489,7 @@ essential = true
 				pod := coretest.UnschedulablePod(coretest.PodOptions{
 					Tolerations: []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
 				})
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				content, err = os.ReadFile("testdata/br_userdata_merged.golden")
 				Expect(err).To(BeNil())
@@ -1500,7 +1503,7 @@ essential = true
 				pod := coretest.UnschedulablePod(coretest.PodOptions{
 					Tolerations: []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
 				})
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				content, err := os.ReadFile("testdata/br_userdata_unmerged.golden")
 				Expect(err).To(BeNil())
@@ -1514,7 +1517,7 @@ essential = true
 				}
 				ExpectApplied(ctx, env.Client, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				// This will not be scheduled since we were pointed to a non-existent EC2NodeClass resource.
 				ExpectNotScheduled(ctx, env.Client, pod)
 			})
@@ -1522,7 +1525,7 @@ essential = true
 				nodeClass.Spec.UserData = aws.String("#/bin/bash\n ./not-toml.sh")
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				// This will not be scheduled since userData cannot be generated for the prospective node.
 				ExpectNotScheduled(ctx, env.Client, pod)
 			})
@@ -1536,7 +1539,7 @@ essential = true
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 2))
 				awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1560,7 +1563,7 @@ essential = true
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 				awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1583,7 +1586,7 @@ essential = true
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 				ExpectLaunchTemplatesCreatedWithUserDataContaining(`
@@ -1601,7 +1604,7 @@ essential = true
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 2))
 				ExpectLaunchTemplatesCreatedWithUserDataContaining(`
@@ -1624,7 +1627,7 @@ eviction-max-pod-grace-period = 10
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 				awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1644,7 +1647,7 @@ eviction-max-pod-grace-period = 10
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 2))
 				awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1662,7 +1665,7 @@ eviction-max-pod-grace-period = 10
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 				awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1682,7 +1685,7 @@ eviction-max-pod-grace-period = 10
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 				awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1699,7 +1702,7 @@ eviction-max-pod-grace-period = 10
 			It("should pass ClusterDNSIP when discovered", func() {
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 2))
 				awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1717,7 +1720,7 @@ eviction-max-pod-grace-period = 10
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 				awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -1738,7 +1741,7 @@ eviction-max-pod-grace-period = 10
 
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				for _, userData := range ExpectUserDataExistsFromCreatedLaunchTemplates() {
 					config := &bootstrap.BottlerocketConfig{}
@@ -1765,7 +1768,7 @@ eviction-max-pod-grace-period = 10
 
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				for _, userData := range ExpectUserDataExistsFromCreatedLaunchTemplates() {
 					config := &bootstrap.BottlerocketConfig{}
@@ -1786,7 +1789,7 @@ eviction-max-pod-grace-period = 10
 				nodeClass.Spec.UserData = aws.String(string(content))
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				content, err = os.ReadFile("testdata/al2_userdata_merged.golden")
 				Expect(err).To(BeNil())
@@ -1799,7 +1802,7 @@ eviction-max-pod-grace-period = 10
 				nodeClass.Spec.UserData = aws.String(string(content))
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				content, err = os.ReadFile("testdata/al2_userdata_merged.golden")
 				Expect(err).To(BeNil())
@@ -1812,7 +1815,7 @@ eviction-max-pod-grace-period = 10
 				nodeClass.Spec.UserData = aws.String(string(content))
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				content, err = os.ReadFile("testdata/al2_userdata_merged.golden")
 				Expect(err).To(BeNil())
@@ -1823,7 +1826,7 @@ eviction-max-pod-grace-period = 10
 				nodeClass.Spec.UserData = nil
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				content, err := os.ReadFile("testdata/al2_userdata_unmerged.golden")
 				Expect(err).To(BeNil())
@@ -1858,7 +1861,7 @@ eviction-max-pod-grace-period = 10
 							Operator: corev1.TolerationOpExists,
 						}},
 					}))
-					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 					ExpectScheduled(ctx, env.Client, pod)
 					for _, userData := range ExpectUserDataExistsFromCreatedLaunchTemplates() {
 						configs := ExpectUserDataCreatedWithNodeConfigs(userData)
@@ -1882,7 +1885,7 @@ eviction-max-pod-grace-period = 10
 
 					ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 					pod := coretest.UnschedulablePod()
-					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 					ExpectScheduled(ctx, env.Client, pod)
 					for _, userData := range ExpectUserDataExistsFromCreatedLaunchTemplates() {
 						configs := ExpectUserDataCreatedWithNodeConfigs(userData)
@@ -1913,7 +1916,7 @@ eviction-max-pod-grace-period = 10
 
 					ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 					pod := coretest.UnschedulablePod()
-					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 					ExpectScheduled(ctx, env.Client, pod)
 					for _, userData := range ExpectUserDataExistsFromCreatedLaunchTemplates() {
 						configs := ExpectUserDataCreatedWithNodeConfigs(userData)
@@ -1933,7 +1936,7 @@ eviction-max-pod-grace-period = 10
 						nodeClass.Spec.Kubelet = &kc
 						ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 						pod := coretest.UnschedulablePod()
-						ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+						ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 						ExpectScheduled(ctx, env.Client, pod)
 
 						// Convert provided KubeletConfiguration to an InlineConfig for comparison with NodeConfig
@@ -2023,7 +2026,7 @@ eviction-max-pod-grace-period = 10
 				nodeClass.Spec.InstanceStorePolicy = lo.ToPtr(v1.InstanceStorePolicyRAID0)
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				for _, userData := range ExpectUserDataExistsFromCreatedLaunchTemplates() {
 					configs := ExpectUserDataCreatedWithNodeConfigs(userData)
@@ -2042,7 +2045,7 @@ eviction-max-pod-grace-period = 10
 					nodeClass.Spec.Kubelet = &v1.KubeletConfiguration{MaxPods: lo.ToPtr[int32](110)}
 					ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 					pod := coretest.UnschedulablePod()
-					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 					ExpectScheduled(ctx, env.Client, pod)
 					content, err := os.ReadFile("testdata/" + mergedFile)
 					Expect(err).To(BeNil())
@@ -2058,7 +2061,7 @@ eviction-max-pod-grace-period = 10
 				awsEnv.LaunchTemplateProvider.ClusterCIDR.Store(nil)
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectNotScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(Equal(0))
 			})
@@ -2077,7 +2080,7 @@ eviction-max-pod-grace-period = 10
 				}
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 1))
 				awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -2098,7 +2101,7 @@ eviction-max-pod-grace-period = 10
 				}
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				ExpectLaunchTemplatesCreatedWithUserData("special user data")
 			})
@@ -2125,7 +2128,7 @@ eviction-max-pod-grace-period = 10
 				}})
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				_, err := awsEnv.AMIProvider.List(ctx, nodeClass)
 				Expect(err).To(BeNil())
@@ -2162,7 +2165,7 @@ eviction-max-pod-grace-period = 10
 				}
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically(">=", 2))
 				expectedImageIds := sets.New[string]("ami-123", "ami-456")
@@ -2213,7 +2216,7 @@ eviction-max-pod-grace-period = 10
 				}
 				ExpectApplied(ctx, env.Client, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 1))
 				awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -2228,7 +2231,7 @@ eviction-max-pod-grace-period = 10
 				nodeClass.Status.AMIs = []v1.AMI{}
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectNotScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(Equal(0))
 			})
@@ -2247,7 +2250,7 @@ eviction-max-pod-grace-period = 10
 				}
 				ExpectApplied(ctx, env.Client, nodeClass, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectNotScheduled(ctx, env.Client, pod)
 				Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(Equal(0))
 			})
@@ -2267,7 +2270,7 @@ eviction-max-pod-grace-period = 10
 				ExpectApplied(ctx, env.Client, nodeClass)
 				ExpectApplied(ctx, env.Client, nodePool)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				input := awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Pop()
 				Expect(*input.LaunchTemplateData.ImageId).To(ContainSubstring("test-ami"))
@@ -2285,7 +2288,7 @@ eviction-max-pod-grace-period = 10
 							Limits:   corev1.ResourceList{v1.ResourceEFA: resource.MustParse("2")},
 						},
 					}, coretest.PodOptions{}))
-					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 					ExpectScheduled(ctx, env.Client, pod)
 					input := awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Pop()
 					Expect(*input.LaunchTemplateData.NetworkInterfaces[0].AssociatePublicIpAddress).To(Equal(expectedValue))
@@ -2301,7 +2304,7 @@ eviction-max-pod-grace-period = 10
 				nodeClass.Spec.Kubelet = &v1.KubeletConfiguration{ClusterDNS: []string{"10.0.10.100"}}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 				pod := coretest.UnschedulablePod()
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				ExpectLaunchTemplatesCreatedWithUserDataContaining("--dns-cluster-ip '10.0.10.100'")
 			})
@@ -2324,7 +2327,7 @@ eviction-max-pod-grace-period = 10
 						corev1.LabelWindowsBuild: "10.0.20348",
 					},
 				})
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				content, err = os.ReadFile("testdata/windows_userdata_merged.golden")
 				Expect(err).To(BeNil())
@@ -2339,7 +2342,7 @@ eviction-max-pod-grace-period = 10
 						corev1.LabelWindowsBuild: "10.0.20348",
 					},
 				})
-				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 				ExpectScheduled(ctx, env.Client, pod)
 				content, err := os.ReadFile("testdata/windows_userdata_unmerged.golden")
 				Expect(err).To(BeNil())
@@ -2351,7 +2354,7 @@ eviction-max-pod-grace-period = 10
 		It("should default detailed monitoring to off", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -2362,7 +2365,7 @@ eviction-max-pod-grace-period = 10
 			nodeClass.Spec.DetailedMonitoring = aws.Bool(true)
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -2374,7 +2377,7 @@ eviction-max-pod-grace-period = 10
 		It("should set the default instance metadata settings on instances", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -2387,7 +2390,7 @@ eviction-max-pod-grace-period = 10
 		It("should set instance metadata tags to disabled", func() {
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeNumerically("==", 5))
 			awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
@@ -2435,7 +2438,7 @@ eviction-max-pod-grace-period = 10
 							Limits:   corev1.ResourceList{v1.ResourceEFA: resource.MustParse("2")},
 						},
 					}, coretest.PodOptions{}))
-					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+					ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 					ExpectScheduled(ctx, env.Client, pod)
 					input := awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Pop()
 
@@ -2516,7 +2519,7 @@ eviction-max-pod-grace-period = 10
 		}}}
 		pod := coretest.UnschedulablePod()
 		ExpectApplied(ctx, env.Client, pod, nodePool, nodeClass)
-		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+		ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 		ExpectScheduled(ctx, env.Client, pod)
 
 		launchTemplates := map[string]*ec2.CreateLaunchTemplateInput{}
@@ -2564,7 +2567,7 @@ eviction-max-pod-grace-period = 10
 
 			pod := coretest.UnschedulablePod()
 			ExpectApplied(ctx, env.Client, pod, nodePool, nodeClass)
-			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, ncProv, pod)
 			ExpectScheduled(ctx, env.Client, pod)
 
 			var launchTemplates []*ec2.CreateLaunchTemplateInput
