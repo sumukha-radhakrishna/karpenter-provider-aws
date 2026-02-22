@@ -258,7 +258,7 @@ spec:
       {{- with .Values.tolerations }}
       tolerations:
         - key: workload
-          operator: Eq
+          operator: Equal
           value: isolated
         {{- toYaml . | nindent 8 }}
       {{- end }}
