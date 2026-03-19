@@ -222,7 +222,7 @@ func (c *Client) backupInstances(ctx context.Context) error {
 			}
 		}
 		stored := cm.DeepCopy()
-		cm.Data = map[string]string{"instances": string(removeNullFields(lo.Must(json.Marshal(lo.Slice(instances, i*500, (i+1)*500)))))}
+		cm.Data = map[string]string{"instances": string(removeNullFields(lo.Must(json.Marshal(lo.Slice(instances, i*500, (i+1)*500)))))} //nolint:gosec // G117 false positive - ClientToken is an EC2 instance field, not a secret
 		if !equality.Semantic.DeepEqual(cm, stored) {
 			if err := c.kubeClient.Patch(ctx, cm, client.MergeFrom(stored)); err != nil {
 				errs[i] = fmt.Errorf("patching configmap %q, %w", cm.Name, err)
