@@ -23,6 +23,7 @@ HELM_OPTS ?= --set serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn=${K
 			--set settings.featureGates.spotToSpotConsolidation=true \
 			--set settings.featureGates.nodeOverlay=true \
 			--set settings.featureGates.staticCapacity=true \
+			--set settings.featureGates.capacityBuffer=true \
 			--set settings.preferencePolicy=Ignore \
 			--set logLevel=debug \
 			--create-namespace
@@ -35,7 +36,7 @@ KOCACHE ?= ~/.ko
 
 # Common Directories
 MOD_DIRS = $(shell find . -path "./website" -prune -o -name go.mod -type f -print | xargs dirname)
-KARPENTER_CORE_DIR = $(shell go list -m -f '{{ .Dir }}' sigs.k8s.io/karpenter)
+KARPENTER_CORE_DIR = "/Users/rsumukha/workspace/karpenter/karpenter"
 
 # TEST_SUITE enables you to select a specific test suite directory to run "make e2etests" against
 TEST_SUITE ?= "..."

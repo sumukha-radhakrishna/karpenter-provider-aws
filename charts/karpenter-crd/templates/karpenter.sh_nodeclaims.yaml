@@ -129,7 +129,7 @@ spec:
                       key:
                         description: The label key that the selector applies to.
                         type: string
-                        maxLength: 316
+                        maxLength: 317
                         pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*(\/))?([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]$
                         x-kubernetes-validations:
                           - message: label domain "karpenter.sh" is restricted

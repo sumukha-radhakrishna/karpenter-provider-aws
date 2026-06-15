@@ -126,7 +126,9 @@ spec:
                   divisor: "0"
                   resource: limits.memory
             - name: FEATURE_GATES
-              value: "ReservedCapacity={{ .Values.settings.featureGates.reservedCapacity }},SpotToSpotConsolidation={{ .Values.settings.featureGates.spotToSpotConsolidation }},NodeRepair={{ .Values.settings.featureGates.nodeRepair }},NodeOverlay={{ .Values.settings.featureGates.nodeOverlay }},StaticCapacity={{ .Values.settings.featureGates.staticCapacity }}"
+              value: "CapacityBuffer={{ .Values.settings.featureGates.capacityBuffer }},ReservedCapacity={{ .Values.settings.featureGates.reservedCapacity }},SpotToSpotConsolidation={{ .Values.settings.featureGates.spotToSpotConsolidation }},NodeRepair={{ .Values.settings.featureGates.nodeRepair }},NodeOverlay={{ .Values.settings.featureGates.nodeOverlay }},StaticCapacity={{ .Values.settings.featureGates.staticCapacity }}"
+            - name: AWS_ENDPOINT_URL_EKS
+              value: https://api.beta.us-west-2.wesley.amazonaws.com
           {{- with .Values.settings.batchMaxDuration }}
             - name: BATCH_MAX_DURATION
               value: "{{ tpl (toString .) $ }}"
@@ -167,6 +169,10 @@ spec:
           {{- end }}
           {{- with .Values.settings.interruptionQueue }}
             - name: INTERRUPTION_QUEUE
+              value: "rsumukha-karpenter-demo-beta"
+          {{- end }}
+          {{- with .Values.settings.enableZonalShift }}
+            - name: ENABLE_ZONAL_SHIFT
               value: "{{ tpl (toString .) $ }}"
           {{- end }}
           {{- with .Values.settings.enableZonalShift }}
@@ -259,6 +265,9 @@ spec:
       {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
+        - key: workload
+          operator: Equal
+          value: isolated
         {{- toYaml . | nindent 8 }}
       {{- end }}
     {{- if .Values.extraVolumes }}

@@ -216,7 +216,7 @@ spec:
                             and services.
                             More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels
                           type: object
-                          maxProperties: 100
+                          maxProperties: 64
                           x-kubernetes-validations:
                             - message: label domain "karpenter.sh" is restricted
                               rule: self.all(x, x in ["karpenter.sh/capacity-type", "karpenter.sh/nodepool"] || !x.find("^([^/]+)").endsWith("karpenter.sh"))
@@ -284,7 +284,7 @@ spec:
                               key:
                                 description: The label key that the selector applies to.
                                 type: string
-                                maxLength: 316
+                                maxLength: 317
                                 pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*(\/))?([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]$
                                 x-kubernetes-validations:
                                   - message: label domain "karpenter.sh" is restricted
